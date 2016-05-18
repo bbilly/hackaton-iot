@@ -1,21 +1,36 @@
-﻿#!flask/bin/python
+#!flask/bin/python
 # coding: utf-8
 #Seulement pour debug
 from __future__ import print_function
-
+import collections
 from flask import Flask, request, jsonify
 from celery import Celery
-
-import sys
+from dateutil.parser import parse
+from dateutil.relativedelta import *
+from datetime import datetime
+import os
 import sqlite3
 import settings
+import functools
+import urllib.parse
+import sys
+import time
 
 app = Flask(__name__)
+app.debug = True
 
+#Permet de garder l'ordre des dictionnaire lors de la jsonify du dictionnaire des données
+app.config["JSON_SORT_KEYS"] = False
+app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
+#Vidage de la base au démarrage
+try:
+    os.remove(settings.DATABASE)
+except OSError:
+    pass
 #Récupération des informations de configuration
 app.config.from_object(settings)
 #Création ou réutilisation de la bdd
-conn_uri = 'rest.db'
+conn_uri = settings.DATABASE
 #Connection à la base de données
 conn = sqlite3.connect(conn_uri)
 #Création du curseur
@@ -47,44 +62,66 @@ def make_celery(app):
 celery = make_celery(app)
 
 
+#Cette fonction permet d'ajouter la durée au RF3339 de début et retourne
+#une RFC3339 de fin au bont format.
+def get_end_timestamp(duration, begin_timestamp):
+    #Parsing de la date et ajout de la durée
+    end_date = parse(begin_timestamp)+relativedelta(seconds=+int(duration))
+    #Le format ne respectant pas parfaitement la RFC, on recupère que jusqu'au centaines sur les milisecondes.
+    try:
+        ret = datetime.strptime(str(end_date).split("+")[0], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%dT%H:%M:%S.%f%z')
+    except:
+        try:
+            ret = datetime.strptime(str(end_date).split("+")[0], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%dT%H:%M:%S.%f%z')
+        except:
+            raise
+    return (str(ret) + "Z")
+
+
 @celery.task(name="main.add")
-def add(data):
+def add(dataList):
 
     conn = sqlite3.connect(conn_uri)
     cursor = conn.cursor()
     cursor.execute("""BEGIN TRANSACTION""")
-    for data in dataList:
-        cursor.execute("""INSERT INTO data(id,timestamp,sensorType,value) VALUES (:id,:timestamp,:sensorType,:value)""", data)
+    cursor.executemany("""INSERT INTO data(id,timestamp,sensorType,value) VALUES (:id,:timestamp,:sensorType,:value)""", dataList)
     conn.commit()
+    del dataList[:]
 
 
 @celery.task(name="main.get")
-def get(end_timestamp, duration):
+def get(begin_timestamp, duration):
     #On commit la liste en base avant de faire le get afin de s'assurer de la concordande des données
     add(dataList)
-    del dataList[:]
+    time.sleep(1)
     conn = sqlite3.connect(conn_uri)
     cursor = conn.cursor()
-    if(duration == 0):
-        cursor.execute('SELECT * FROM data WHERE timestamp BETWEEN ? AND ?', (end_timestamp, end_timestamp))
-        rows = cursor.fetchall()
-        for row in rows:
-            print (row[0], file=sys.stderr)
-    else:
-        cursor.execute('SELECT * FROM data WHERE timestamp BETWEEN ? AND ?', (end_timestamp, end_timestamp))
-        rows = cursor.fetchall()
-        for row in rows:
-            print (row[0], file=sys.stderr)
+    dataSet = []
 
-    #test
-    data = {
-        "sensorType": 1,
-        "minValue": 1,
-        "maxValue": 42,
-        "mediumValue": 27.42
-    }
+    #Création de la date de fin, le timestamp RFC3339 de fin est début_timestamp plus la durée
+    begin = str(begin_timestamp)
+    end = get_end_timestamp(duration, begin_timestamp)
+    print("Begin : " + begin, file=sys.stderr)
+    print("End : " + end, file=sys.stderr)
+    cursor.execute("""SELECT DISTINCT sensorType FROM data WHERE timestamp BETWEEN ? AND ? ORDER BY sensorType""", (begin, end))
+    sensorTypes = [row[0] for row in cursor.fetchall()]
+    for sensorType in sensorTypes:
 
-    return jsonify(synthesis=[data, data, data, data, data, data, data, data, data, data])
+        cursor.execute("""SELECT value FROM data WHERE sensortype = ? AND timestamp BETWEEN ? AND ?""", (sensorType, begin, end))
+        valuesBysensorType = [row[0] for row in cursor.fetchall()]
+        minValue = min(int(minValue) for minValue in valuesBysensorType)
+        maxValue = max(int(maxValue) for maxValue in valuesBysensorType)
+        meanValue = functools.reduce(lambda x, y: x + y, valuesBysensorType) / len(valuesBysensorType)
+        meanValue = "%.2f" % meanValue
+
+        data = collections.OrderedDict()
+        data['sensorType'] = int(sensorType)
+        data['minValue'] = int(minValue)
+        data['maxValue'] = int(maxValue)
+        data['mediumValue'] = float(meanValue)
+        dataSet.append(data)
+
+    return jsonify(synthesis=dataSet)
 
 
 #Service REST d'acquisition de messages provenant d'objets connectés
@@ -98,9 +135,8 @@ def save_messages():
         "value": request.json["value"]
     }
     dataList.append(data.copy())
-    if len(dataList) == 1000:
+    if len(dataList) == settings.NB_MSG_TO_COMMIT:
         add(dataList)
-        del dataList[:]
     return "Ok"
 
 
@@ -108,10 +144,10 @@ def save_messages():
 @app.route('/messages/synthesis', methods=['GET'])
 def synthesis():
 
-    timestamp = request.args.get('timestamp')
-    duration = request.args.get('duration')
-    ret = get(timestamp, duration)
-    return ret
+    #On s'assure que l'encodage URL est bien transformé
+    timestamp = urllib.parse.unquote(urllib.parse.unquote(request.args.get("timestamp")))
+    duration = request.args.get("duration")
+    return get(timestamp, duration)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
