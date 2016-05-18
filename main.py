@@ -15,6 +15,7 @@ import functools
 import urllib.parse
 import sys
 import time
+import json
 
 app = Flask(__name__)
 app.debug = True
@@ -38,7 +39,7 @@ cursor = conn.cursor()
 #Désynchronisation pour gagner en performance, perte de stabilité en contrepartie.
 cursor.execute("""PRAGMA synchronous=OFF""")
 #Création de la table
-cursor.execute("""CREATE TABLE IF NOT EXISTS data(id TEXT,timestamp TEXT,sensorType INTEGER,value INTEGER)""")
+cursor.execute("""CREATE TABLE IF NOT EXISTS data(id INTEGER,timestamp TIMESTAMP,sensorType INTEGER,value INTEGER)""")
 conn.commit()
 
 #Création d'une liste pour stocker les données en mémoire pour éviter de commit les données trop souvent
@@ -75,7 +76,7 @@ def get_end_timestamp(duration, begin_timestamp):
             ret = datetime.strptime(str(end_date).split("+")[0], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%dT%H:%M:%S.%f%z')
         except:
             raise
-    return (str(ret) + "Z")
+    return end_date.timestamp()
 
 
 @celery.task(name="main.add")
@@ -99,15 +100,17 @@ def get(begin_timestamp, duration):
     dataSet = []
 
     #Création de la date de fin, le timestamp RFC3339 de fin est début_timestamp plus la durée
-    begin = str(begin_timestamp)
+    begin = parse(begin_timestamp).timestamp()
     end = get_end_timestamp(duration, begin_timestamp)
-    print("Begin : " + begin, file=sys.stderr)
-    print("End : " + end, file=sys.stderr)
-    cursor.execute("""SELECT DISTINCT sensorType FROM data WHERE timestamp BETWEEN ? AND ? ORDER BY sensorType""", (begin, end))
+    print("Begin : " + str(begin), file=sys.stderr)
+    print("End : " + str(end), file=sys.stderr)
+    cursor.execute("""SELECT sensorType FROM data GROUP BY sensorType""")
     sensorTypes = [row[0] for row in cursor.fetchall()]
-    for sensorType in sensorTypes:
 
-        cursor.execute("""SELECT value FROM data WHERE sensortype = ? AND timestamp BETWEEN ? AND ?""", (sensorType, begin, end))
+    for sensorType in sensorTypes:
+        a = int(sensorType)
+        print(a)
+        cursor.execute("SELECT value FROM data WHERE sensorType=?", (a,))
         valuesBysensorType = [row[0] for row in cursor.fetchall()]
         minValue = min(int(minValue) for minValue in valuesBysensorType)
         maxValue = max(int(maxValue) for maxValue in valuesBysensorType)
@@ -120,8 +123,8 @@ def get(begin_timestamp, duration):
         data['maxValue'] = int(maxValue)
         data['mediumValue'] = float(meanValue)
         dataSet.append(data)
-
-    return jsonify(synthesis=dataSet)
+    
+    return json.dumps(dataSet, separators=(',', ': '))
 
 
 #Service REST d'acquisition de messages provenant d'objets connectés
