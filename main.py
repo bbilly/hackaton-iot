@@ -109,7 +109,6 @@ def get(begin_timestamp, duration):
 
     for sensorType in sensorTypes:
         a = int(sensorType)
-        print(a)
         cursor.execute("SELECT value FROM data WHERE sensorType=?", (a,))
         valuesBysensorType = [row[0] for row in cursor.fetchall()]
         minValue = min(int(minValue) for minValue in valuesBysensorType)
