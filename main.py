@@ -32,7 +32,7 @@ conn = sqlite3.connect(conn_uri)
 #Création du curseur
 cursor = conn.cursor()
 #Désynchronisation pour gagner en performance, perte de stabilité en contrepartie.
-cursor.execute("""PRAGMA synchronous=OFF""")
+cursor.execute("""PRAGMA synchronous=WAL""")
 #Création de la table
 cursor.execute("""CREATE TABLE IF NOT EXISTS data(id TEXT,timestamp TEXT,sensorType INTEGER,value INTEGER)""")
 conn.commit()
